@@ -1,0 +1,26 @@
+name: fpa-sample
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "${ACCEPT_EULA:-N}"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Fpa_Sample_Passw0rd!}"
+
+  servicebus:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    depends_on:
+      - mssql
+    ports:
+      - "5672:5672"
+      - "5300:5300"
+    environment:
+      SQL_SERVER: mssql
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Fpa_Sample_Passw0rd!}"
+      ACCEPT_EULA: "${ACCEPT_EULA:-N}"
+    volumes:
+      - ./servicebus-config.json:/ServiceBus_Emulator/ConfigFiles/Config.json
