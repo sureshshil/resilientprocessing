@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FPA Pipeline Sample</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #6b7280; --border: #e3e6ea;
+    --pending: #d1d5db; --running: #2563eb; --done: #16a34a; --failed: #dc2626; --retry: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --card: #1a1e24; --text: #e6e8eb; --muted: #9aa3ad; --border: #2a3038; --pending: #3a4048; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 8px 0 16px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  form { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+  input, select, button { font: inherit; padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); }
+  button { background: var(--running); color: #fff; border: none; cursor: pointer; align-self: end; }
+  .hint { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .stages { display: flex; gap: 4px; }
+  .pill { display: inline-block; min-width: 90px; padding: 2px 6px; border-radius: 4px; font-size: 11px; color: #fff; }
+  .PENDING { background: var(--pending); color: var(--text); }
+  .RUNNING { background: var(--running); }
+  .COMPLETED { background: var(--done); }
+  .FAILED { background: var(--failed); }
+  .RETRYING { background: var(--retry); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .error { white-space: normal; min-width: 200px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>FPA resilient pipeline sample</h1>
+
+  <section>
+    <h2>Submit a recording</h2>
+    <form id="submit">
+      <label>opportunityId<input name="opportunityId" required></label>
+      <label>agentId<input name="agentId" required></label>
+      <label>clientId<input name="clientId" required></label>
+      <label>eventId<input name="eventId" required></label>
+      <label>sessionId<input name="sessionId" required></label>
+      <label>recordingId<input name="recordingId" required></label>
+      <label>recordingType
+        <select name="recordingType"><option>audio</option><option>consent</option></select>
+      </label>
+      <label>Fault stage
+        <select name="faultStage">
+          <option value="">none</option>
+          <option>transcription</option><option>summary</option><option>profiling</option>
+          <option>compliance</option><option>behaviour</option>
+        </select>
+      </label>
+      <label>Fault type
+        <select name="faultType">
+          <option value="llm_429">llm_429 (rate limit)</option>
+          <option value="llm_timeout">llm_timeout</option>
+          <option value="llm_500">llm_500 (server error)</option>
+          <option value="llm_content_blocked">llm_content_blocked (permanent)</option>
+          <option value="bad_audio">bad_audio (permanent)</option>
+          <option value="slow">slow (60s, to kill the worker)</option>
+        </select>
+      </label>
+      <label>Fault times (0 = always)<input name="faultTimes" type="number" min="0" value="2"></label>
+      <button type="submit">Submit</button>
+    </form>
+    <p class="hint">Each stage retries 3 times in place. Try <b>llm_429 × 2</b> (recovers in place),
+      <b>llm_500 × 4</b> (goes RETRYING, recovers on the next attempt) or <b>llm_500 × 0</b> (gives up).</p>
+    <p id="result" class="muted"></p>
+  </section>
+
+  <section>
+    <h2>Recent jobs <span class="muted">(refreshes every 2s)</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Job</th><th>Status</th><th>Stages (tries)</th><th>Attempts</th><th>Next send</th><th>Owner</th><th>Error</th></tr></thead>
+        <tbody id="jobs"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const STAGES = ["transcription", "summary", "profiling", "compliance", "behaviour"];
+const KEY_FIELDS = ["opportunityId", "agentId", "clientId", "eventId", "sessionId", "recordingId", "recordingType"];
+const form = document.getElementById("submit");
+const result = document.getElementById("result");
+
+const rand = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 7)}`;
+const esc = (value) => String(value ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const time = (iso) => iso ? new Date(iso).toLocaleTimeString() : "";
+
+function fillIds() {
+  const prefixes = {opportunityId: "OPP", agentId: "AG", clientId: "CL", eventId: "EV", sessionId: "S", recordingId: "rec"};
+  for (const [name, prefix] of Object.entries(prefixes)) form.elements[name].value = rand(prefix);
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = new FormData(form);
+  const body = Object.fromEntries(KEY_FIELDS.map((name) => [name, data.get(name)]));
+  body.faults = {};
+  if (data.get("faultStage")) {
+    body.faults[data.get("faultStage")] = {type: data.get("faultType"), times: Number(data.get("faultTimes"))};
+  }
+  try {
+    const response = await fetch("/jobs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const json = await response.json();
+    result.textContent = `${response.status}: ${json.id ?? json.status ?? JSON.stringify(json.detail)}`;
+  } catch (err) {
+    result.textContent = `Submit failed: ${err}`;
+  }
+  fillIds();
+  refresh();
+});
+
+function row(job) {
+  const stages = STAGES.map((s) => {
+    const st = job.stages[s];
+    return `<span class="pill ${esc(st.status)}" title="${esc(st.output)}">${s} (${st.tries})</span>`;
+  }).join("");
+  return `<tr>
+    <td>${esc(job.id)}</td>
+    <td><span class="pill ${esc(job.status)}">${esc(job.status)}</span></td>
+    <td><div class="stages">${stages}</div></td>
+    <td>${job.attempts}</td>
+    <td class="muted">${job.sendMe ? time(job.sendAfter) : ""}</td>
+    <td class="muted">${esc(job.owner)}</td>
+    <td class="muted error">${esc(job.error)}</td>
+  </tr>`;
+}
+
+async function refresh() {
+  try {
+    const jobs = await (await fetch("/jobs")).json();
+    document.getElementById("jobs").innerHTML = jobs.map(row).join("");
+  } catch (err) {
+    result.textContent = `Refresh failed: ${err}`;
+  }
+}
+
+fillIds();
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
